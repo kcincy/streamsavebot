@@ -1,0 +1,75 @@
+name: streamsavebot
+
+services:
+  bot:
+    build: .
+    image: streamsavebot:local
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 35m
+    cpus: 6.0
+    mem_limit: 6g
+    shm_size: 1gb
+    pids_limit: 4096
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "-B", "/app/src/operations.py"]
+      interval: 30s
+      timeout: 5s
+      start_period: 120s
+      retries: 3
+    environment:
+      TELEGRAM_API_MODE: local
+      TELEGRAM_API_URL: http://127.0.0.1:8081
+    volumes:
+      - database:/app/database
+      - cache:/app/cache
+      - logs:/app/logs
+      - type: bind
+        source: ./database/backups
+        target: /app/database/backups
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./database/sheets/images
+        target: /app/database/sheets/images
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./main.py
+        target: /app/main.py
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./src
+        target: /app/src
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./.env
+        target: /app/.env
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./settings.env
+        target: /app/settings.env
+        read_only: true
+        bind:
+          create_host_path: false
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  database:
+  cache:
+  logs:

@@ -1,0 +1,16 @@
+**
+!Dockerfile
+!requirements.txt
+!main.py
+!src/
+!src/**
+!tests/
+!tests/**
+!scripts/
+!scripts/docker_import.py
+!docker/
+!docker/entrypoint.sh
+!docs/
+!docs/stripchat-mouflon-LICENSE.txt
+**/__pycache__/
+**/*.pyc
