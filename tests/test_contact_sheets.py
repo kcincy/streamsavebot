@@ -112,29 +112,43 @@ class ContactSheetTests(unittest.TestCase):
 
 class ContactSheetPipelineTests(unittest.IsolatedAsyncioTestCase):
     async def test_catalogo_contem_participantes_e_persiste_apos_limpeza(self):
+        await self.exercise(12)
+
+    async def test_parte_curta_e_ignorada_antes_da_folha_sem_erro_ou_envio(self):
+        await self.exercise(9)
+
+    async def exercise(self,seconds):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp)
             config=replace(Config('TEST'),database=root/'database'/'bot.sqlite3',spool=root/'spool',api_files=root/'files')
             store=Store(config.database)
-            bot=SimpleNamespace(send_video=AsyncMock(),send_document=AsyncMock())
+            bot=SimpleNamespace(send_video=AsyncMock(return_value=SimpleNamespace(
+                message_id=1,video=SimpleNamespace(file_id='FILE'))),send_document=AsyncMock())
             pipeline=DeliveryService(config,store,bot)
             try:
                 for uid in (1,2,9876543210):store.add(uid,uid,'stripchat:alvo')
                 store.fix_identity('stripchat:alvo','111')
                 ident='c'*32;folder=pipeline._folder(ident);folder.mkdir()
-                raw=folder/'capture.mp4';source=await asyncio.to_thread(video,root)
+                raw=folder/'capture.mp4';source=await asyncio.to_thread(video,root,(COLORS*2)[:seconds])
                 shutil.copyfile(source,raw)
                 store.begin_capture('stripchat:alvo',ident,'live-1')
                 store.leave_capture(2,'stripchat:alvo',ident)
-                started=time.time()-9
+                started=time.time()-seconds
                 store.register_clip(ident,'stripchat:alvo','live-1',started,raw,
-                    dict(title='Minha live',profile_id='111',ended=started+9,seconds=9),3600)
+                    dict(title='Minha live',profile_id='111',ended=started+seconds,seconds=seconds),3600)
                 await pipeline.start()
                 async def completed():
                     while store.db.execute('SELECT status FROM clips WHERE id=?',(ident,)).fetchone()[0]!='done':
                         await asyncio.sleep(.05)
                 await asyncio.wait_for(completed(),30)
-                self.assertFalse(folder.exists());bot.send_video.assert_not_called()
+                self.assertFalse(folder.exists())
+                if seconds<10:
+                    bot.send_video.assert_not_called();bot.send_document.assert_not_called()
+                    self.assertEqual(store.delivery_status(1,'stripchat:alvo'),{'skipped':1})
+                    with closing(sqlite3.connect(pipeline.sheets/'sheets.sqlite3')) as db:
+                        self.assertEqual(db.execute('SELECT COUNT(*) FROM recordings').fetchone()[0],0)
+                    return
+                self.assertEqual(bot.send_video.call_count,2)
                 with closing(sqlite3.connect(pipeline.sheets/'sheets.sqlite3')) as db:
                     db.row_factory=sqlite3.Row;row=db.execute('SELECT * FROM recordings').fetchone()
                     self.assertEqual(row['title'],'Minha live')

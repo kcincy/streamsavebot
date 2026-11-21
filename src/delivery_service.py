@@ -255,7 +255,12 @@ def probe_video(path):
 def video_info(path,probe=None):
     probe=probe if probe is not None else probe_video(path)
     video=next(s for s in probe['streams'] if s['codec_type']=='video')
-    duration=float(probe['format'].get('duration') or 0) or media_duration(path)
+    duration=float(probe['format'].get('duration') or 0)
+    if duration<=0:
+        # A codec change can leave one untimed frame and no audio packets.
+        single_frame=video.get('nb_read_packets')=='1' and all(
+            s.get('nb_read_packets','0')=='0' for s in probe['streams'] if s is not video)
+        duration=0.0 if single_frame else media_duration(path)
     return dict(duration=max(1,math.ceil(duration)),width=video['width'],height=video['height'],duration_seconds=duration)
 
 
@@ -468,6 +473,10 @@ class DeliveryService:
                     def inspect():return {str(path):video_info(path) for path,kind in outputs if kind=='video'}
                     info=await asyncio.to_thread(inspect)
                 else:outputs,info=await asyncio.to_thread(prepare_videos,outputs,self.config.part_bytes)
+                if info and all(item['duration_seconds']<MIN_VIDEO_SECONDS for item in info.values()):
+                    self.store.processed(clip_id,outputs,info)
+                    log.info('parte curta; folha dispensada id=%s',clip_id)
+                    continue
                 meta=json.loads(row['metadata'])
                 platform,username=split_profile(row['username'])
                 profile_id=str(meta.get('profile_id') or self.store.platform_id(row['username']))
@@ -534,7 +543,7 @@ class DeliveryService:
                         seconds=info['duration']-1
                     else:
                         raise RuntimeError('unknown_media_duration')
-                if not math.isfinite(seconds) or seconds<=0:
+                if not math.isfinite(seconds) or seconds<0:
                     raise RuntimeError('unknown_media_duration')
                 if seconds<MIN_VIDEO_SECONDS:
                     self.store.delivery(row,'skipped',error='below_minimum_duration')

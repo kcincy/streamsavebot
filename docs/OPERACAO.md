@@ -68,6 +68,11 @@ foi adicionado**; a etapa 3 permanece adiada.
 
 ### TikTok — mudança de configuração de vídeo
 
+Fragmentos com menos de 10 segundos são ignorados antes da criação do contact sheet,
+sem aparecer como falha de processamento. Um único frame sem duração e sem pacotes de
+áudio também é tratado como fragmento curto; durações desconhecidas de outros vídeos
+continuam preservadas para revisão, sem envio automático.
+
 O caminho anterior mantinha a configuração inicial de vídeo ao dividir o MP4 fragmentado.
 Agora o TikTok é remuxado por cópia em FLV, preservando os cabeçalhos AVC/HEVC e AAC.
 Ao mudar um cabeçalho, a parte anterior fecha e a próxima começa em um quadro-chave com

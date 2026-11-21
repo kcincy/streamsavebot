@@ -15,7 +15,7 @@ import uuid
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1] / "src"))
 from config import Config
-from delivery_service import DeliveryService,SpoolBudget,process_clip,run_media,PartTooLarge,prepare_videos
+from delivery_service import DeliveryService,SpoolBudget,process_clip,run_media,PartTooLarge,prepare_videos,video_info
 from logging_setup import SafeFormatter
 from process_control import InstanceGuard
 from storage import Store
@@ -125,6 +125,16 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.bot.send_video.assert_not_called()
         self.assertEqual(self.store.delivery_status(1,'alvo'),{'uncertain':1})
         await self.pipeline.cleanup();self.assertTrue(path.exists())
+
+    async def test_frame_sem_duracao_e_ignorado_sem_virar_falha(self):
+        cid,path=self.clip(users=(1,))
+        with self.store.db:
+            self.store.db.execute('UPDATE media SET info=? WHERE clip_id=?',
+                (json.dumps({'duration':1,'duration_seconds':0.0}),cid))
+        await self.pipeline.send(self.store.next_delivery())
+        self.bot.send_video.assert_not_called();self.bot.send_document.assert_not_called()
+        self.assertEqual(self.store.delivery_status(1,'alvo'),{'skipped':1})
+        await self.pipeline.cleanup();self.assertFalse(path.parent.exists())
 
     async def test_limite_de_dez_segundos_com_mp4_e_ffprobe_reais(self):
         from project_runtime import media_tool
@@ -251,6 +261,16 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ProcessingTests(unittest.TestCase):
+    def test_frame_unico_sem_tempo_nao_confunde_duracao_desconhecida_com_video_curto(self):
+        probe=dict(format={},streams=[dict(codec_type='video',width=360,height=640,nb_read_packets='1'),
+                                      dict(codec_type='audio')])
+        with patch('delivery_service.media_duration',side_effect=RuntimeError('unknown_media_duration')) as duration:
+            self.assertEqual(video_info(Path('single.mp4'),probe)['duration_seconds'],0.0)
+            duration.assert_not_called()
+            probe['streams'][0]['nb_read_packets']='2'
+            with self.assertRaisesRegex(RuntimeError,'unknown_media_duration'):
+                video_info(Path('unknown.mp4'),probe)
+
     def test_hevc_mp4_is_copied_with_identical_video_packets_and_original_resolution(self):
         from project_runtime import media_tool
         with tempfile.TemporaryDirectory() as tmp:
