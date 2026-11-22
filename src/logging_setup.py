@@ -3,7 +3,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 import re
 
-from project_runtime import ROOT
+from project_runtime import LOGS
 
 
 class SafeFormatter(logging.Formatter):
@@ -20,8 +20,8 @@ class SafeFormatter(logging.Formatter):
 
 
 def configure_logging(secrets=()):
-    folder = ROOT / "logs"
-    folder.mkdir(exist_ok=True)
+    folder = LOGS
+    folder.mkdir(parents=True,exist_ok=True)
     handler = RotatingFileHandler(folder / "bot.log", maxBytes=5 * 1024 * 1024,
                                   backupCount=5, encoding="utf-8")
     handler.setFormatter(SafeFormatter(secrets))

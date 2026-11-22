@@ -16,7 +16,6 @@ import zipfile
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'src'))
 from backups import create_backup,verify_archive
 from config import Config
-from contact_sheets import initialize
 from delivery_service import SpoolBudget
 from resource_control import CaptureGate,PlatformBackoff,ResourceProbe
 from storage import Store
@@ -60,6 +59,14 @@ class ProductionTests(unittest.TestCase):
         self.now=70;self.gate.update(self.good);self.assertFalse(self.gate.blocked)
         self.gate.release('three');self.assertNotIn('three',self.gate.active)
 
+    def test_moderate_cpu_and_memory_pressure_admits_but_high_pressure_waits(self):
+        self.gate.update(dict(self.good,cpu=.84,memory=.84))
+        self.assertTrue(self.gate.request('one',[1]))
+        self.gate.starting.clear();self.now=16
+        self.gate.update(dict(self.good,cpu=.85))
+        self.assertFalse(self.gate.request('three',[2]))
+        self.assertEqual(self.gate.reason,'cpu')
+
     def test_disk_full_metrics_failure_and_pending_budget(self):
         self.gate.update(dict(self.good,free=100))
         self.assertFalse(self.gate.request('one',[1]))
@@ -68,6 +75,21 @@ class ProductionTests(unittest.TestCase):
         self.delivery.budget.ids.clear()
         with patch.object(self.gate.probe,'sample',side_effect=OSError):self.gate.poll()
         self.assertFalse(self.gate.request('one',[1]));self.assertEqual(self.gate.reason,'metrics')
+
+    def test_disk_only_mode_admits_one_capture_without_cgroup_and_still_checks_free_space(self):
+        config=replace(self.config,disk_only_resources=True,max_captures=1)
+        gate=CaptureGate(config,self.store,self.delivery,clock=lambda:self.now)
+        with patch.object(Path,'read_text',side_effect=OSError), \
+             patch('resource_control.shutil.disk_usage',return_value=SimpleNamespace(free=2*1024**3)) as disk_usage:
+            gate.poll()
+            self.assertEqual(gate.health()['resources'],{'free':2*1024**3})
+            self.assertTrue(gate.request('one',[1]))
+            gate.starting.clear();self.now=16
+            self.assertFalse(gate.request('three',[2]))
+            disk_usage.return_value=SimpleNamespace(free=0)
+            gate.poll()
+        self.assertEqual(gate.reason,'disk')
+        self.assertEqual(gate.revoked,{'one'})
 
     def test_queue_survives_restart_and_cancel(self):
         self.gate.update(dict(self.good,memory=.9));self.gate.request('one',[1])
@@ -94,23 +116,19 @@ class ProductionTests(unittest.TestCase):
         self.assertEqual(policy.delay('kick',15),15)
         policy.recovered('tiktok');self.assertEqual(policy.delay('tiktok',15),15)
 
-    def test_backup_restores_wal_database_pending_video_and_images(self):
-        initialize(self.config.database.parent/'sheets')
-        image=self.config.database.parent/'sheets/images/test.jpg';image.write_bytes(b'image')
+    def test_backup_restores_wal_database_and_pending_video(self):
         folder=self.config.spool/('a'*32);folder.mkdir();raw=folder/'capture.flv';raw.write_bytes(b'pending-source')
         self.store.register_clip('a'*32,'one','live',1,raw,{},1)
         with patch('backups.shutil.disk_usage',return_value=SimpleNamespace(free=100*1024**3)):
             archive=create_backup(self.config)
         restored=self.root/'restore';manifest=verify_archive(archive,restored)
         self.assertEqual((restored/'cache/spool'/('a'*32)/'capture.flv').read_bytes(),b'pending-source')
-        self.assertEqual((restored/'database/sheets/images/test.jpg').read_bytes(),b'image')
         with closing(sqlite3.connect(restored/'database/bot.sqlite3')) as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM subscriptions').fetchone()[0],3)
         self.assertNotIn('project/.env',manifest['sha256'])
         with self.assertRaises(ValueError):verify_archive(archive,restored)
 
     def test_backup_failure_preserves_previous_and_rejects_bad_digest(self):
-        initialize(self.config.database.parent/'sheets')
         with patch('backups.shutil.disk_usage',return_value=SimpleNamespace(free=100*1024**3)):
             archive=create_backup(self.config)
         with patch('backups.shutil.disk_usage',return_value=SimpleNamespace(free=0)):

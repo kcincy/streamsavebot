@@ -1,7 +1,7 @@
 """Spool temporario limitado, processamento e uma fila duravel de envios."""
 import asyncio
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime
 from html import escape
 import json
 import logging
@@ -18,9 +18,8 @@ import uuid
 from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TelegramError
 
 from project_runtime import media_tool
-from platforms import PLATFORMS,split_profile,profile_url
+from platforms import PLATFORMS,split_profile
 from i18n import tr,date_format
-import contact_sheets
 
 log = logging.getLogger(__name__)
 MIN_VIDEO_SECONDS=10
@@ -345,22 +344,23 @@ class DeliveryService:
         self.blocked_callback = None
         self.pending_deletes = {}
         self.alerted={}
+        self.overdue=False
         self.backing_up=False
         self.processing=None
         self.can_process=lambda:True
-        self.sheets=contact_sheets.initialize(config.database.parent/'sheets')
 
     async def alert(self,key,message):
         now=time.monotonic()
-        if now-self.alerted.get(key,-1e9)<900:return
+        if now-self.alerted.get(key,-1e9)<900:return False
         self.alerted[key]=now
         log.warning('operational_alert key=%s',key)
         uid=self.config.superuser_id
-        if not uid:return
-        row=self.store.db.execute('SELECT chat_id FROM users WHERE user_id=? AND blocked=0',(uid,)).fetchone()
-        if row:
-            try:await self.bot.send_message(chat_id=row['chat_id'],text='⚠️ '+tr(self.store.language(uid),message))
-            except TelegramError as exc:log.warning('alert_delivery_failed error=%s',type(exc).__name__)
+        if uid:
+            row=self.store.db.execute('SELECT chat_id FROM users WHERE user_id=? AND blocked=0',(uid,)).fetchone()
+            if row:
+                try:await self.bot.send_message(chat_id=row['chat_id'],text='⚠️ '+tr(self.store.language(uid),message))
+                except TelegramError as exc:log.warning('alert_delivery_failed error=%s',type(exc).__name__)
+        return True
 
     def _folder(self, clip_id):
         if not re.fullmatch(r'[0-9a-f]{32}', clip_id):
@@ -475,28 +475,12 @@ class DeliveryService:
                 else:outputs,info=await asyncio.to_thread(prepare_videos,outputs,self.config.part_bytes)
                 if info and all(item['duration_seconds']<MIN_VIDEO_SECONDS for item in info.values()):
                     self.store.processed(clip_id,outputs,info)
-                    log.info('parte curta; folha dispensada id=%s',clip_id)
+                    log.info('parte curta id=%s',clip_id)
                     continue
-                meta=json.loads(row['metadata'])
-                platform,username=split_profile(row['username'])
-                profile_id=str(meta.get('profile_id') or self.store.platform_id(row['username']))
-                members=self.store.capture_snapshot(clip_id,row['username'])
-                if members is None:
-                    members=self.store.db.execute('SELECT user_id FROM clip_recipients WHERE clip_id=?',(clip_id,)).fetchall()
-                ended=meta.get('ended') or row['started']+float(meta.get('seconds') or 0)
-                record=dict(recording_id=clip_id,live_id=row['live_id'],part_number=row['part_no'],
-                    title=meta.get('title') or None,profile_name=self.store.profile_name(row['username']) or username,
-                    profile_url=profile_url('profile/'+profile_id) if platform=='superlive' and profile_id else profile_url(row['username']),
-                    profile_id=profile_id,platform=platform,
-                    recording_started_at=datetime.fromtimestamp(row['started'],timezone.utc).isoformat(),
-                    recording_ended_at=datetime.fromtimestamp(ended,timezone.utc).isoformat(),
-                    telegram_user_ids=json.dumps(sorted({m['user_id'] for m in members})))
-                await asyncio.to_thread(contact_sheets.create_sheet,self.sheets,record,outputs,info,run_media)
                 if self.config.watermark_active:
                     outputs=await asyncio.to_thread(watermark_outputs,outputs,info,self.config.watermark_text,
                                                    self.config.part_bytes,self.root,self.config.spool_bytes)
                     outputs,info=await asyncio.to_thread(prepare_videos,outputs,self.config.part_bytes)
-                    await asyncio.to_thread(contact_sheets.set_video_count,self.sheets,clip_id,len(outputs))
                 self.store.processed(clip_id, outputs,info)
                 log.info('parte processada id=%s partes=%s bytes=%s', clip_id,len(outputs),
                          sum(p.stat().st_size for p,_ in outputs))
@@ -618,8 +602,11 @@ class DeliveryService:
 
     async def cleanup(self):
         if self.backing_up:return
-        overdue=self.store.db.execute("SELECT COUNT(*) FROM clips WHERE expires<? AND status IN ('raw','ready','failed')",(time.time(),)).fetchone()[0]
-        if overdue:await self.alert('overdue','Some recordings are taking longer than expected to send. Pending files are preserved; new recordings will wait if the delivery queue fills.')
+        overdue=self.store.has_overdue_work(time.time())
+        if not overdue:
+            self.overdue=False
+        elif not self.overdue:
+            self.overdue=await self.alert('overdue','Some recordings are taking longer than expected to send. Pending files are preserved; new recordings will wait if the delivery queue fills.')
         if self.backing_up:return
         for row in self.store.cleanup_candidates():
             if row['id'] == self.inflight:

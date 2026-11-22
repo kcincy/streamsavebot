@@ -12,7 +12,7 @@ import sys
 import threading
 from urllib.parse import urlsplit
 
-from project_runtime import CACHE, DATABASE, TOOLS
+from project_runtime import CACHE, DATABASE, TOOLS, LOGS
 
 log = logging.getLogger(__name__)
 _job = None
@@ -135,7 +135,7 @@ class LocalAPI:
         self.reader.start()
         for _ in range(200):
             if self.process.poll() is not None:
-                raise RuntimeError('O servidor local encerrou durante a inicializacao. Confira logs/bot.log.')
+                raise RuntimeError(f'O servidor local encerrou durante a inicializacao. Confira {LOGS / "bot.log"}.')
             try:
                 reader,writer=await asyncio.open_connection('127.0.0.1',port)
                 writer.close();await writer.wait_closed()

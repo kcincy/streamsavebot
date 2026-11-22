@@ -245,10 +245,3 @@ class StripchatEngineTests(unittest.IsolatedAsyncioTestCase):
                 await registry.close();await pipeline.close();store.close()
                 server.shutdown();server.server_close();thread.join()
             self.assertEqual(list(config.spool.iterdir()),[])
-            with closing(sqlite3.connect(pipeline.sheets/'sheets.sqlite3')) as db:
-                db.row_factory=sqlite3.Row
-                sheets=db.execute('SELECT * FROM recordings ORDER BY recording_started_at').fetchall()
-                self.assertEqual(len(sheets),4)
-                self.assertEqual([json.loads(row['telegram_user_ids']) for row in sheets],[[1,2],[2],[2],[1,2]])
-                self.assertTrue(all(row['title']=='Live de teste' and row['status']=='ready' for row in sheets))
-                self.assertTrue(all((pipeline.sheets/'images'/row['sheet_filename']).is_file() for row in sheets))

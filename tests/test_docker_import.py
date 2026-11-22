@@ -10,7 +10,6 @@ import unittest
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'src'))
 from storage import Store
-import contact_sheets
 
 spec=importlib.util.spec_from_file_location('docker_import',ROOT/'scripts'/'docker_import.py')
 migration=importlib.util.module_from_spec(spec);spec.loader.exec_module(migration)
@@ -36,10 +35,6 @@ class DockerImportTests(unittest.TestCase):
             (source/'sessions').mkdir()
             (source/'sessions'/'superlive.json').write_text('{"cookies":[]}',encoding='utf8')
             (source/'settings.env').write_text('SUPERLIVE_STATE=sessions\\superlive.json\n',encoding='utf8')
-            sheets=contact_sheets.initialize(source/'database'/'sheets')
-            (sheets/'images'/'example.jpg').write_bytes(b'sheet')
-            # O Docker cria o destino do bind mount antes de executar o importador.
-            (target/'database'/'sheets'/'images').mkdir(parents=True)
             before=(source/'database'/'bot.sqlite3').read_bytes()
             self.assertEqual(migration.import_runtime(source,target),2)
             copied=Store(target/'database'/'bot.sqlite3')
@@ -52,20 +47,18 @@ class DockerImportTests(unittest.TestCase):
             finally:copied.close()
             self.assertEqual((source/'database'/'bot.sqlite3').read_bytes(),before)
             self.assertEqual((target/'database'/'sessions'/'superlive.json').read_text(),'{"cookies":[]}')
-            self.assertEqual((target/'database'/'sheets'/'images'/'example.jpg').read_bytes(),b'sheet')
-            with closing(sqlite3.connect(target/'database'/'sheets'/'sheets.sqlite3')) as db:
-                self.assertEqual(db.execute('PRAGMA integrity_check').fetchone()[0],'ok')
             with self.assertRaisesRegex(ValueError,'já contêm'):migration.import_runtime(source,target)
 
-    def test_recusa_imagens_locais_existentes_antes_de_importar(self):
+    def test_importa_layout_data_e_recusa_destino_existente(self):
         with tempfile.TemporaryDirectory() as tmp:
             source=Path(tmp)/'source';target=Path(tmp)/'target'
-            store=Store(source/'database'/'bot.sqlite3');store.close()
-            images=target/'database'/'sheets'/'images';images.mkdir(parents=True)
-            (images/'existing.jpg').write_bytes(b'preserve')
+            store=Store(source/'data'/'database'/'bot.sqlite3')
+            store.add(1,10,'alvo');store.close()
+            migration.import_runtime(source,target)
+            copied=Store(target/'database'/'bot.sqlite3')
+            try:self.assertEqual(copied.subscriptions(1),['alvo'])
+            finally:copied.close()
             with self.assertRaises(ValueError):migration.import_runtime(source,target)
-            self.assertEqual((images/'existing.jpg').read_bytes(),b'preserve')
-            self.assertFalse((target/'database'/'bot.sqlite3').exists())
 
     def test_recusa_travessia_e_sessao_fora_do_projeto(self):
         with tempfile.TemporaryDirectory() as tmp:

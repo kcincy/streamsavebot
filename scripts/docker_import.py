@@ -34,17 +34,14 @@ def rebase_paths(db,spool):
 
 def import_runtime(source,target):
     source,target=source.resolve(),target.resolve()
+    runtime=source/'data' if (source/'data'/'database'/'bot.sqlite3').is_file() else source
     database,cache=target/'database',target/'cache'
     for folder in (database,cache):folder.mkdir(parents=True,exist_ok=True)
     destinations=[database/'bot.sqlite3',database/'telegram-bot-api',database/'sessions',
                   cache/'spool',cache/'telegram-bot-api']
-    sheets=database/'sheets'
-    # O bind mount de imagens pode criar estas duas pastas antes da primeira importacao.
-    sheets_occupied=sheets.exists() and (not sheets.is_dir() or any(
-        path.name!='images' or not path.is_dir() or any(path.iterdir()) for path in sheets.iterdir()))
-    if sheets_occupied or any(path.exists() for path in destinations):
+    if any(path.exists() for path in destinations):
         raise ValueError('Os volumes de destino já contêm dados; nada foi sobrescrito.')
-    original=source/'database'/'bot.sqlite3'
+    original=runtime/'database'/'bot.sqlite3'
     if not original.is_file():raise ValueError('Banco de origem não encontrado.')
     with tempfile.TemporaryDirectory(prefix='.import-',dir=database) as first,\
          tempfile.TemporaryDirectory(prefix='.import-',dir=cache) as second:
@@ -55,10 +52,9 @@ def import_runtime(source,target):
             if new.execute('PRAGMA integrity_check').fetchone()[0]!='ok':
                 raise ValueError('O banco de origem não passou na verificação de integridade.')
             changed=rebase_paths(new,cache/'spool')
-        for parent,name,stage in ((source/'database','telegram-bot-api',db_stage),
-                                  (source/'database','sheets',db_stage),
-                                  (source/'cache','spool',cache_stage),
-                                  (source/'cache','telegram-bot-api',cache_stage)):
+        for parent,name,stage in ((runtime/'database','telegram-bot-api',db_stage),
+                                  (runtime/'cache','spool',cache_stage),
+                                  (runtime/'cache','telegram-bot-api',cache_stage)):
             if (parent/name).is_dir():shutil.copytree(parent/name,stage/name)
         settings=dotenv_values(source/'settings.env',interpolate=False)
         for name,filename in (('SUPERLIVE_STATE','superlive.json'),('STRIPCHAT_STATE','stripchat.json')):
@@ -76,9 +72,7 @@ def import_runtime(source,target):
         # O banco só aparece depois dos arquivos; uma importação incompleta não inicia o bot.
         for stage,destination in ((db_stage,database),(cache_stage,cache)):
             for path in stage.iterdir():
-                if path.name=='sheets' and (destination/path.name).exists():
-                    shutil.copytree(path,destination/path.name,dirs_exist_ok=True)
-                elif path.name!='bot.sqlite3':path.rename(destination/path.name)
+                if path.name!='bot.sqlite3':path.rename(destination/path.name)
         os.link(db_stage/'bot.sqlite3',database/'bot.sqlite3')
     return changed
 

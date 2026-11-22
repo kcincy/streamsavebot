@@ -5,8 +5,11 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOLS = ROOT / "tools"
-CACHE = ROOT / "cache"
-DATABASE = ROOT / "database"
+# Docker preserves its existing volume paths; local installations keep runtime data together.
+DATA = Path(os.environ.get('STREAMSAVEBOT_DATA_DIR', ROOT / 'data')).resolve()
+CACHE = DATA / "cache"
+DATABASE = DATA / "database"
+LOGS = DATA / "logs"
 
 
 def configure_runtime() -> None:

@@ -1,160 +1,115 @@
-# Operação — versão 2026.11.19.1
+# Operação
 
-A versão 2026.11.19.2 adiciona marca d'água opcional, atualmente ativada com o texto
-`teste`. Ela exige reencodificação e aumenta o custo de processamento, mantendo as
-dimensões e os frames. Configuração, medições e limites: [WATERMARK.md](WATERMARK.md).
+## Dados e atualizações
 
-Atualização 2026.11.19.3: não há cota semanal nem `/limits`. O cadastro comum continua
-limitado a três perfis; Enviar fecha a parte e mantém a captura, Remover exclui a inscrição.
-Os nomes SuperLive no monitor incluem o ID. A marca é controlada por `WATERMARK_ENABLED`
-(`true` / `false`) no `.env`, com o texto mantido no `settings.env`.
+Em instalações locais, `data/database` guarda cadastros, estados e backups;
+`data/cache` guarda os vídeos temporários e `data/logs` guarda os registros.
+As ferramentas ficam em `tools` e o ambiente Python em `.venv`.
 
-## O que entra nesta versão
+No Docker, os volumes `streamsavebot_database`, `streamsavebot_cache` e
+`streamsavebot_logs` mantêm os caminhos internos `/app/database`, `/app/cache` e
+`/app/logs`. Isso preserva as referências dos arquivos pendentes e da Bot API.
+O Dockerfile configura `STREAMSAVEBOT_DATA_DIR=/app` para esse fim.
+O diretório `data/database/backups` do computador é montado no volume do banco.
 
-Partes de **até 300 MB decimais**, com qualidade original. O buffer continua limitado a
-16 GiB, com **52 reservas** compartilhadas entre capturas e partes na fila. As três
-margens globais de processamento, corte e cache continuam separadas. `MAX_ACTIVE_CAPTURES=100`
-é um teto de segurança, não uma promessa de capacidade: os recursos e o buffer podem
-permitir bem menos. A proteção também se aplica ao superusuário.
+Após editar apenas Python ou configurações, execute `docker compose restart bot`.
+Após editar o Compose, execute `docker compose up -d`. Para dependências e arquivos
+copiados para a imagem, use `docker compose up -d --build`.
+Não use `docker compose down -v`: isso apaga os volumes com os dados do bot.
 
-### Admissão e recuperação
+## Migrar uma instalação local para Docker
 
-- Medição a cada 5 segundos. CPU relativa à cota real do contêiner; com 6 CPUs, 80% equivale
-  a 4,8 núcleos. Memória usa o consumo do cgroup descontando cache de arquivo inativo
-  recuperável; pouca memória disponível na VM também bloqueia admissões.
-- Uma inicialização por vez, com pelo menos 15 segundos entre entradas. A próxima aguarda
-  os primeiros dados da anterior, evitando acumular vários bootstraps caros.
-- CPU ou memória a 80% já impedem uma nova entrada. Após 15 segundos nessa faixa, a
-  proteção só libera novas entradas depois de 30 segundos abaixo de 65% CPU e 70% memória.
-- Memória a 90% por 5 segundos, ou CPU a 95% por 60 segundos: finalizar a captura admitida
-  mais recentemente. No máximo uma suspensão a cada 30 segundos; o perfil espera pelo menos
-  60 segundos antes de tentar novamente. A parte capturada é entregue normalmente.
-- Sem ao menos 1 GiB ou quatro partes de espaço livre (o maior dos dois), nenhuma nova
-  captura começa; as existentes são finalizadas para reservar espaço ao processamento e aos
-  envios. O espaço livre considera o volume Linux e as pastas compartilhadas do Windows,
-  usando o menor valor. Métricas indisponíveis também bloqueiam novas entradas.
-- Prioridade para contas com menos capturas ativas; depois, ordem de chegada. Uma captura
-  pode atender vários usuários. A posição pode mudar quando entram usuários menos atendidos.
-  A fila é persistida no SQLite, e entradas offline, canceladas ou sem interessados saem dela.
-- Verificações de perfis têm concorrência 2. Cinco falhas consecutivas por plataforma
-  aumentam o intervalo de reconexão; dados gravados com sucesso zeram o contador.
-- O watchdog finaliza e reinicia a sessão de um perfil que fique 90 segundos sem crescimento
-  do arquivo, ou 120 segundos sem concluir uma inicialização admitida. O FFmpeg de captura
-  também tem proteção própria contra fonte sem progresso e pode ser encerrado à força
-  depois de dois segundos sem responder ao encerramento normal, preservando tags completas.
-  Não reinicia todo o navegador para recuperar um único perfil.
-
-`/monitor` informa posição e espera por recursos em inglês ou português. Espera não
-consome tempo de gravação no histórico. Trechos transmitidos durante a espera não são recuperáveis.
-
-### Retenção e envios
-
-O antigo prazo de uma hora passa a disparar um alerta de atraso: **não apaga gravações
-pendentes, falhas de processamento ou uploads sem confirmação**. Arquivos entregues são
-limpos normalmente. Se os pendentes encherem o buffer, novas partes aguardam espaço;
-não há descarte automático para abrir vagas. Pendências sem solução precisam de revisão
-operacional e podem manter o buffer cheio.
-
-Envios alternam usuários, preservando a ordem das partes de cada perfil para cada destinatário.
-Retentativas respeitam o estado e os limites do Telegram. Envios ambíguos continuam sem
-repetição automática, para evitar duplicações. Comandos têm limite por usuário de 20
-solicitações em rajada, com reposição de 2 por segundo. Avisos de excesso têm intervalo
-mínimo de 10 segundos.
-
-Alertas operacionais são enviados ao superusuário cadastrado, no idioma salvo, com limite
-de um aviso por motivo a cada 15 minutos. Abrangem pressão de recursos, captura sem progresso,
-processamento, atraso de entrega e falha de backup. **Nenhum painel ou comando administrativo
-foi adicionado**; a etapa 3 permanece adiada.
-
-### TikTok — mudança de configuração de vídeo
-
-Fragmentos com menos de 10 segundos são ignorados antes da criação do contact sheet,
-sem aparecer como falha de processamento. Um único frame sem duração e sem pacotes de
-áudio também é tratado como fragmento curto; durações desconhecidas de outros vídeos
-continuam preservadas para revisão, sem envio automático.
-
-O caminho anterior mantinha a configuração inicial de vídeo ao dividir o MP4 fragmentado.
-Agora o TikTok é remuxado por cópia em FLV, preservando os cabeçalhos AVC/HEVC e AAC.
-Ao mudar um cabeçalho, a parte anterior fecha e a próxima começa em um quadro-chave com
-a configuração atual. As partes são preparadas para MP4 no envio, preservando a resolução
-de cada trecho, sem forçar uma qualidade inferior nem reencodar o vídeo compatível.
-
-Foi confirmado erro de decodificação H.264 no arquivo entregue do perfil
-6804923004176565253, iniciado em 19/11/2026 às 19:05:07. A mídia das 18:53:44 foi localizada
-no catálogo, mas o Telegram não disponibilizou seu arquivo na tentativa de recuperação.
-A causa exata dessas duas gravações antigas não pôde ser comprovada sem a fonte bruta.
-A mudança de configuração é uma falha reproduzida e corrigida no novo fluxo. Cabeçalhos
-perdidos não podem ser reconstruídos com segurança a partir do vídeo corrompido sozinho.
-O arquivo recuperado está preservado em `cache/incidents/tiktok-20261119/`, no Windows e
-no volume Docker. As nove extrações de frames do sheet agora abortam se houver erro de
-decodificação; uma falha preserva o bruto, impede o envio automático e alerta o administrador.
-Essa verificação é amostral: não decodifica todo o vídeo nem garante detectar defeitos entre amostras.
-
-### Backups locais
-
-Primeira tentativa 30 segundos após a inicialização, em baixa carga; depois, a cada 24 horas.
-Uma falha preserva os backups anteriores e tenta novamente em uma hora. Durante a cópia,
-novas capturas, processamento e envios aguardam; gravações já em andamento continuam.
-O backup aguarda processamento ou envio em curso terminar antes de começar.
-
-Os arquivos `production-*.zip` ficam diretamente em **database/backups**, no Windows,
-por bind mount. São mantidos os três últimos arquivos verificados. Outros backups manuais
-da pasta não são removidos. Cada arquivo contém:
-
-- snapshots consistentes de ambos os SQLite, pela API de backup;
-- imagens dos sheets;
-- arquivos já finalizados ainda necessários à fila;
-- código Python e configurações disponíveis no contêiner;
-- manifesto SHA-256, CRC do ZIP e verificação `integrity_check` dos bancos.
-
-Credenciais, cookies, sessões de autenticação e capturas ainda em andamento são excluídos.
-Não é um arquivo permanente de todos os vídeos. Na perda completa do ambiente pode ser
-necessário autenticar novamente. A cópia fora do computador foi adiada por decisão do usuário.
-
-A criação exige espaço para arquivo, verificação e todo o buffer de captura, com mais
-1 GiB de margem. Se não houver espaço, o backup falha com alerta sem apagar o anterior.
-
-Verificar um backup, sem tocar no banco ativo:
+Pare a instância local e aguarde o encerramento completo. As credenciais ficam na
+raiz do projeto. Para importar o banco e a fila uma única vez:
 
 ```powershell
-docker compose exec -T bot python -B /app/src/backups.py /app/database/backups/NOME.zip
+New-Item -ItemType Directory -Force data/database/backups | Out-Null
+docker compose build
+docker compose run --rm --no-deps --entrypoint python --volume "${PWD}:/import:ro" bot -B scripts/docker_import.py /import
+docker compose up -d
 ```
 
-Testar extração para uma pasta **nova ou vazia**, sem substituir a produção:
+O importador aceita dados em `data/database` e `data/cache`, além do layout antigo
+com essas pastas na raiz. Não sobrescreve destinos já preenchidos. Sessões de sites
+configuradas precisam estar em um caminho relativo dentro do projeto.
+
+Depois da migração, os volumes Docker são a fonte atual dos dados. Uma cópia local
+antiga não deve substituir o banco do container.
+
+## Configuração
+
+| Arquivo/chave | Uso |
+| --- | --- |
+| `.env` | Token do bot e credenciais da Bot API |
+| `WATERMARK_ENABLED` no `.env` | `true` ou `false` para a marca-d'água |
+| `SUPERUSER_ID` | Conta isenta do limite de perfis |
+| `PART_MAX_MB` | Tamanho máximo de cada arquivo; atualmente 300 MB |
+| `SPOOL_MAX_MB` | Orçamento de temporários; atualmente 16384 MiB |
+| `MAX_ACTIVE_CAPTURES` | Teto de capturas; CPU, memória, disco e fila podem limitar antes |
+| `TEMP_RETENTION_SECONDS` | Prazo para alertar sobre uma fila atrasada; não apaga os pendentes |
+| `WATERMARK_TEXT` | Texto central nos primeiros 30 segundos de cada arquivo |
+
+O Compose define os limites de CPU e memória. Na configuração atual, 300 MB por
+parte e 16 GiB de temporários permitem 52 reservas, compartilhadas entre capturas
+e vídeos aguardando processamento ou envio. Não é uma garantia de 100 lives.
+O código não reduz resolução ou FPS durante o processamento. No TikTok, escolhe
+a melhor qualidade anunciada, usando uma alternativa quando o original não está disponível.
+
+O modo normal aguarda recursos quando CPU ou RAM chegam a 80%. Após sobrecarga
+sustentada, retoma com CPU abaixo de 65% e RAM abaixo de 70% por 30 segundos.
+RAM crítica por 5 segundos ou CPU crítica por 60 segundos pode finalizar uma
+captura recente e colocá-la de volta na fila. O modo `DISK_ONLY_RESOURCES`
+é destinado ao ambiente Termux; veja o guia próprio antes de usá-lo.
+
+## TikTok e estados de conexão
+
+O TikTok usa consultas HTTP e Streamlink para abrir a melhor qualidade disponível. Um erro de
+rede não confirma que o perfil está offline. Respostas incompletas são verificadas
+pela página pública da live e pelos dados da sala, mantendo a identidade do perfil.
+
+“Ao vivo · Aguardando um fluxo de vídeo” significa que a live existe, mas nenhum
+fluxo de vídeo foi disponibilizado. O bot prefere o original e aceita a melhor
+alternativa anunciada. Salas privadas, pagas ou restritas não são gravadas por esse caminho.
+
+“Aguardando espaço na fila de envio” significa que as reservas de temporários
+estão ocupadas. Confira `/stats` e os logs. Erros de processamento preservam o
+arquivo original; um vídeo que já esteja marcado como enviado não deve ser refeito.
+
+## Backups e envios sem confirmação
+
+O bot mantém backups locais verificados do banco e dos arquivos pendentes.
+As três cópias mais recentes são preservadas em `data/database/backups`.
+Credenciais e sessões não são incluídas no ZIP. Os backups ficam no mesmo
+computador; uma falha no disco também pode afetá-los.
+
+Para verificar um ZIP pelo container:
 
 ```powershell
-docker compose exec -T bot python -B /app/src/backups.py /app/database/backups/NOME.zip --restore-to /app/cache/restore-check
+docker compose exec bot python -B src/backups.py /app/database/backups/NOME.zip
 ```
 
-Para restauração efetiva, parar o bot, preservar os volumes atuais e restaurar bancos,
-imagens e spool nos mesmos caminhos do contêiner. Nunca sobrescrever SQLite em uso.
-Como os arquivos usam caminhos `/app/...`, restaurá-los em uma pasta de teste não altera
-as referências do banco para essa pasta.
+Para extrair, acrescente `--restore-to /app/cache/recuperacao-nova`. O destino deve
+estar vazio. Pare o bot antes de substituir um banco e preserve o volume atual.
 
-### Saúde, atualização e validação
+Um timeout depois do início de um upload pode significar que o Telegram recebeu
+o vídeo sem devolver a confirmação. Esses envios são marcados como incertos e
+não são repetidos automaticamente, para evitar duplicações.
 
-O heartbeat é salvo em `cache/health.json` no volume Docker, com contadores de captura,
-fila e recursos. O healthcheck do Compose verifica heartbeat recente e Bot API local.
-O estado `unhealthy` sinaliza falha; Docker Compose não reinicia automaticamente apenas
-por esse estado. Serviços internos encerrados inesperadamente provocam encerramento
-coordenado e a política `restart: unless-stopped` continua aplicável.
+## Windows sem Docker e testes
 
-Antes de atualizar: backup verificado, testes em contêiner separado sem credenciais nem
-volumes de produção e versão identificada no log. Alterações só em Python ainda permitem
-reinício; alterações no Compose exigem recriação, e dependências exigem build.
+Use Python 3.10 ou superior e `scripts/setup.ps1` para criar `.venv` e instalar o
+Chromium do projeto. Disponibilize FFmpeg/FFprobe em `tools/ffmpeg/bin` e o servidor
+oficial em `tools/telegram-bot-api/bin`. Depois, preencha `.env`, copie
+`settings.env.example` para `settings.env` e execute `python main.py`.
+
+Os testes usam fontes locais e respostas simuladas, sem enviar mensagens reais:
 
 ```powershell
-docker compose config --quiet
-docker compose build bot
-docker compose up -d --no-build
-docker compose ps
-docker compose exec -T bot tail -n 60 /app/logs/bot.log
+scripts/test.ps1
+docker compose run --rm --no-deps --entrypoint python bot -B -m unittest discover -s tests -p "test_*.py"
 ```
 
-Não usar `down -v`, não executar outra instância com o mesmo token e não forçar encerramento
-durante upload. Os backups de código anteriores permitem revisão e retorno controlado;
-a migração desta versão só adiciona dados de fila e justiça de envio, sem apagar inscrições.
-
-O teste contínuo de 48–72 horas e a comprovação de 100 lives reais simultâneas ainda são
-critérios de liberação para uma abertura ampla. A fila protege a máquina, mas não aumenta
-sua capacidade de CPU, RAM, rede ou disco. Linux dedicado pode ser avaliado após as medições.
+As licenças dos componentes vendorizados ficam em `src/vendor`. O Docker instala
+FFmpeg/FFprobe e compila o servidor oficial da Bot API nas versões fixadas no
+Dockerfile. O Chromium é compartilhado, com contextos separados, para o SuperLive;
+StripChat usa HTTP, e Kick pode abrir o navegador brevemente para obter acesso.

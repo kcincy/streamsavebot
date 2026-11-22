@@ -8,9 +8,6 @@
 !tests/**
 !scripts/
 !scripts/docker_import.py
-!docker/
-!docker/entrypoint.sh
-!docs/
-!docs/stripchat-mouflon-LICENSE.txt
+!scripts/entrypoint.sh
 **/__pycache__/
 **/*.pyc

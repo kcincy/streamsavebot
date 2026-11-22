@@ -13,7 +13,7 @@ from delivery_service import DeliveryService
 from logging_setup import configure_logging
 from monitor_service import MonitorRegistry
 from process_control import InstanceGuard, LocalAPI, install_process_job
-from project_runtime import ROOT, configure_runtime, media_tool
+from project_runtime import ROOT, LOGS, configure_runtime, media_tool
 from storage import Store
 from operations import Operations
 from version import VERSION
@@ -67,7 +67,7 @@ async def run(config, stop=None):
         await application.updater.start_polling(allowed_updates=['message','callback_query'],drop_pending_updates=False,
                                                 error_callback=polling_error,bootstrap_retries=0)
         log.info('bot pronto version=%s username=%s polling unico API=%s',VERSION,application.bot.username,config.api_mode)
-        print('Bot iniciado. Toda a interacao esta no Telegram. Logs: logs/bot.log.',flush=True)
+        print(f'Bot iniciado. Toda a interacao esta no Telegram. Logs: {LOGS / "bot.log"}.',flush=True)
         while not stop.is_set():
             for task in operations.tasks:
                 if task.done():
@@ -141,7 +141,7 @@ def main():
             message=type(exc).__name__
         if logging.getLogger().handlers:
             log.error('inicializacao/execucao falhou erro=%s detalhe=%s',type(exc).__name__,message)
-        print(f'Erro: {message}. Consulte logs/bot.log.',file=sys.stderr)
+        print(f'Erro: {message}. Consulte {LOGS / "bot.log"}.',file=sys.stderr)
         return 1
 
 

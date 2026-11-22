@@ -366,6 +366,12 @@ class Store:
             "JOIN deliveries d ON d.media_id=m.id WHERE c.status NOT IN ('done','expired') "
             "AND m.file_id IS NULL AND d.status IN ('pending','retry','sending','failed','uncertain') LIMIT 1").fetchone() is not None
 
+    def has_overdue_work(self, now):
+        return self.db.execute(f"""SELECT 1 FROM clips c WHERE c.expires<? AND (
+            c.status IN ('raw','processing') OR (c.status='ready' AND EXISTS (
+                SELECT 1 FROM media m JOIN deliveries d ON d.media_id=m.id
+                WHERE m.clip_id=c.id AND d.status IN {ACTIVE}))) LIMIT 1""",(now,)).fetchone() is not None
+
     def sending(self, row):
         with self.db:
             self.db.execute('UPDATE users SET last_delivery=? WHERE user_id=?',(time.time(),row['user_id']))

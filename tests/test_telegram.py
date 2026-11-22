@@ -95,6 +95,17 @@ class RegistryFixture(unittest.IsolatedAsyncioTestCase):
 
 
 class RegistryTests(RegistryFixture):
+    async def test_tiktok_failure_does_not_delay_other_profiles(self):
+        with patch('monitor_service.StreamlinkRecorder',BlockingRecorder):
+            self.registry.add(1,10,'tiktok:first');self.registry.add(1,10,'tiktok:second')
+            first=self.registry.monitors['tiktok:first'].recorder
+            second=self.registry.monitors['tiktok:second'].recorder
+            for _ in range(5):first.capture_failure()
+            self.assertGreater(first.retry_delay(15),15)
+            self.assertEqual(second.retry_delay(15),15)
+            first.capture_recovered()
+            self.assertEqual(first.retry_delay(15),15)
+
     async def test_cem_monitores_nao_bloqueiam_processamento_no_executor_padrao(self):
         self.registry.config=replace(self.config,superuser_id=9)
         for index in range(100):

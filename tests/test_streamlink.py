@@ -17,11 +17,12 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'src'))
 from requests import Response
 from requests.adapters import BaseAdapter
 from streamlink import Streamlink
+from streamlink.exceptions import StreamError
 from streamlink.plugins.kick import Kick
 from streamlink.stream.hls import HLSStream
 from recorder import Live
 from platforms import profile_key,profile_url
-from streamlink_recorder import StreamlinkRecorder,original_stream,read_box,read_flv_tag,MAX_BOX
+from streamlink_recorder import StreamlinkRecorder,best_stream,read_box,read_flv_tag,MAX_BOX
 from stripchat_capture import IdentityError
 from project_runtime import media_tool
 from delivery_service import run_media,process_clip,prepare_videos,media_duration
@@ -35,6 +36,7 @@ class Fixtures(BaseAdapter):
         data=self.responses[key]
         response=Response();response.status_code=200;response.request=request;response.url=request.url
         response._content=(data if isinstance(data,str) else json.dumps(data)).encode()
+        response._content_consumed=True
         return response
     def close(self):pass
 
@@ -65,7 +67,12 @@ class StreamlinkTests(unittest.TestCase):
             'liveRoom':{'status':status,'streamId':'1234','title':'Live title',
                         'streamData':{'pull_data':{'stream_data':stream}}}}}
 
-    def test_urls_and_original_quality_only(self):
+    def tiktok_profile_page(self, room_id='9876'):
+        user={'id':'111','uniqueId':'tester','roomId':room_id}
+        payload={'__DEFAULT_SCOPE__':{'webapp.user-detail':{'userInfo':{'user':user}}}}
+        return f'<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">{json.dumps(payload)}</script>'
+
+    def test_urls_and_best_available_quality(self):
         for url,key in [('https://kick.com/Tester','kick:tester'),('https://www.tiktok.com/@Tester/live','tiktok:tester'),
                         ('https://www.tiktok.com/@Tester','tiktok:tester'),('tiktok:@tester','tiktok:tester')]:
             self.assertEqual(profile_key(url),key)
@@ -75,9 +82,11 @@ class StreamlinkTests(unittest.TestCase):
                     'https://www.tiktok.com/@tester/video/123','https://evil.tiktok.com/@tester/live'):
             with self.assertRaises(ValueError,msg=url):profile_key(url)
         source,low=object(),object()
-        self.assertIs(original_stream('tiktok',{'h264_origin':source,'best':low}),source)
-        self.assertIsNone(original_stream('tiktok',{'h264_hd':low,'best':low}))
-        self.assertIs(original_stream('kick',{'source':source,'best':low}),source)
+        self.assertIs(best_stream('tiktok',{'h264_origin':source,'best':low}),source)
+        self.assertIs(best_stream('tiktok',{'h264_hd':low,'best':low}),low)
+        self.assertIs(best_stream('tiktok',{'h264_sd':low,'h264_hd':source}),source)
+        self.assertIsNone(best_stream('tiktok',{'best':low}))
+        self.assertIs(best_stream('kick',{'source':source,'best':low}),source)
 
     def test_tiktok_configuration_change_produces_independently_decodable_original_parts(self):
         import subprocess
@@ -137,24 +146,94 @@ class StreamlinkTests(unittest.TestCase):
         self.assertLess(time.monotonic()-started,12)
         self.assertIsNone(rec.proc);self.assertIsNone(rec.input)
 
-    def test_tiktok_official_plugin_identity_title_and_no_downgrade(self):
-        for quality,uid,name,expected in [('origin','111','tester','public'),('hd','111','tester','unavailable'),
+    def test_tiktok_web_api_identity_title_and_best_available_quality(self):
+        for quality,uid,name,expected in [('origin','111','tester','public'),('hd','111','tester','public'),
                                          ('origin','222','tester',IdentityError),('origin','111','other',IdentityError),
-                                         ('origin','','tester',RuntimeError)]:
+                                         ('origin','','tester','unavailable')]:
             with self.subTest(quality=quality,uid=uid,name=name):
-                session,_=self.session({'/api-live/user/room':self.tiktok_api(quality,uid,name)})
+                session,adapter=self.session({'/api-live/user/room':self.tiktok_api(quality,uid,name),
+                    '/@tester':'<html></html>','/@tester/live':'<html></html>'})
                 rec=self.recorder('tiktok','111')
                 with patch('streamlink_recorder.Streamlink',return_value=session),patch('streamlink_recorder.sync_playwright',side_effect=AssertionError('No browser')):
                     if isinstance(expected,type):
                         with self.assertRaises(expected):rec.discover()
                     else:
                         stream,_,live,access=rec.discover()
-                        self.assertEqual(access,expected);self.assertEqual(live,'1234')
+                        self.assertEqual(access,expected)
+                        self.assertNotIn('staleTime=',adapter.urls[0])
+                        if not uid:
+                            self.assertIsNone(stream);self.assertIsNone(live)
+                            continue
+                        self.assertEqual(live,'1234')
                         self.assertEqual(rec.live.title,'Live title');self.assertEqual(rec.live.user_id,'111')
-                        self.assertEqual(stream is not None,quality=='origin')
-        session,_=self.session({'/api-live/user/room':self.tiktok_api(status=4)})
+                        self.assertIsNotNone(stream)
+        session,_=self.session({'/api-live/user/room':self.tiktok_api(status=4),
+            '/@tester':self.tiktok_profile_page('0'),'/@tester/live':'<html></html>'})
         with patch('streamlink_recorder.Streamlink',return_value=session):
             self.assertEqual(self.recorder('tiktok').discover()[-1],'offline')
+
+    def test_tiktok_confirms_room_instead_of_trusting_stale_offline(self):
+        detail={'status_code':0,'data':{'id_str':'9876','owner_user_id_str':'111',
+            'status':2,'title':'Live now','stream_id_str':'12345',
+            'stream_url':{'flv_pull_url':{'ORIGION':'https://cdn.invalid/original.flv',
+                                         'HD1':'https://cdn.invalid/low.flv'},
+                          'flv_pull_url_params':{'ORIGION':'{"VCodec":"hevc"}'}}}}
+        responses={'/api-live/user/room':self.tiktok_api(status=4),
+                   '/@tester':self.tiktok_profile_page(),'/@tester/live':'<html></html>','/webcast/room/info/':detail}
+        session,adapter=self.session(responses);rec=self.recorder('tiktok','111')
+        with patch('streamlink_recorder.Streamlink',return_value=session):
+            stream,streams,token,access=rec.discover()
+        self.assertEqual((token,access,rec.live.title),('12345','public','Live now'))
+        self.assertEqual(set(streams),{'h265_origin','h264_hd'})
+        self.assertEqual(stream.url,'https://cdn.invalid/original.flv')
+        self.assertIn('room_id=9876',adapter.urls[-1])
+        detail['data']['owner_user_id_str']='555'
+        session,_=self.session(responses)
+        with patch('streamlink_recorder.Streamlink',return_value=session):
+            self.assertEqual(self.recorder('tiktok','111').discover()[-1],'unavailable')
+        detail['data']['owner_user_id_str']='111'
+        detail['data']['stream_url_filtered_info']={'is_gated_room':True}
+        session,_=self.session(responses)
+        with patch('streamlink_recorder.Streamlink',return_value=session):
+            self.assertEqual(self.recorder('tiktok','111').discover()[-1],'restricted')
+
+    def test_tiktok_live_page_records_available_hd_when_origin_is_unavailable(self):
+        state={'LiveRoom':{'liveRoomUserInfo':{'user':{'uniqueId':'tester','id':'111','roomId':'9876'}}}}
+        detail={'status_code':0,'data':{'id':'9876','owner':{'id':'111'},'status':2,
+            'stream_id':'12345','stream_url':{'flv_pull_url':{'HD1':'https://cdn.invalid/low.flv'}}}}
+        session,_=self.session({'/api-live/user/room':'<html></html>','/@tester':'<html></html>',
+            '/@tester/live':f'<script type="application/json" id="SIGI_STATE">{json.dumps(state)}</script>',
+            '/webcast/room/info/':detail})
+        rec=self.recorder('tiktok','111')
+        with patch('streamlink_recorder.Streamlink',return_value=session):
+            stream,streams,token,access=rec.discover()
+        self.assertTrue(rec.progress()['online'])
+        self.assertEqual((token,access),('12345','public'))
+        self.assertEqual(set(streams),{'h264_hd'})
+        self.assertEqual(stream.url,'https://cdn.invalid/low.flv')
+
+    def test_tiktok_waits_only_when_no_video_stream_is_advertised(self):
+        payload=self.tiktok_api(quality='ao')
+        session,_=self.session({'/api-live/user/room':payload,
+            '/@tester':'<html></html>','/@tester/live':'<html></html>'})
+        rec=self.recorder('tiktok','111')
+        with patch('streamlink_recorder.Streamlink',return_value=session):
+            stream,streams,token,access=rec.discover()
+        self.assertEqual((stream,streams,token,access),(None,{},'1234','live_no_stream'))
+
+    def test_tiktok_best_available_quality_does_not_open_subscriber_only_room(self):
+        payload=self.tiktok_api(quality='hd')
+        payload['data']['liveRoom']['liveSubOnly']=1
+        session,_=self.session({'/api-live/user/room':payload})
+        with patch('streamlink_recorder.Streamlink',return_value=session):
+            self.assertEqual(self.recorder('tiktok','111').discover()[-1],'restricted')
+
+    def test_tiktok_retries_available_hd_when_origin_fails_before_recording(self):
+        rec=self.recorder('tiktok');origin,hd=object(),object()
+        streams={'h264_origin':origin,'h264_sd':object(),'h264_hd':hd}
+        with patch.object(rec,'capture',side_effect=[StreamError('unavailable'),None]) as capture:
+            rec.capture_stream(origin,streams,'1234')
+        self.assertEqual([call.args[0] for call in capture.call_args_list],[origin,hd])
 
     def test_kick_official_plugin_highest_quality_and_stable_channel_identity(self):
         live={'data':{'id':1234,'playback_url':'https://cdn.invalid/master.m3u8',
@@ -231,8 +310,34 @@ class StreamlinkTests(unittest.TestCase):
         self.assertTrue(rec.fragment(b'init',b'continued'))
         self.assertEqual(len(published),1);rec.publish()
 
+    def test_tiktok_live_page_overrides_stale_offline_profile(self):
+        state={'LiveRoom':{'liveRoomUserInfo':{'user':{'uniqueId':'tester','id':'111','roomId':'9999'},
+                                             'liveRoom':{'status':2}}}}
+        detail={'status_code':0,'data':{'id':'9999','owner':{'id':'111'},'status':2,
+            'stream_id':'12345','stream_url':{'flv_pull_url':{'ORIGIN':'https://cdn.invalid/original.flv'}}}}
+        responses={'/api-live/user/room':self.tiktok_api(status=4),'/@tester':self.tiktok_profile_page('0'),
+            '/@tester/live':f'<script id="SIGI_STATE">{json.dumps(state)}</script>','/webcast/room/info/':detail}
+        for status,expected in ((2,'public'),(4,'live_no_stream')):
+            detail['data']['status']=status
+            session,adapter=self.session(responses)
+            with patch('streamlink_recorder.Streamlink',return_value=session):
+                rec=self.recorder('tiktok','111');stream,_,_,access=rec.discover()
+            self.assertEqual(access,expected)
+            self.assertEqual(stream is not None,status==2)
+            self.assertIn('room_id=9999',adapter.urls[-1])
+
+    def test_tiktok_connection_failure_does_not_keep_previous_offline_status(self):
+        rec=self.recorder('tiktok');rec._online(False)
+        rec._progress['access']='offline'
+        with patch.object(rec,'discover',side_effect=RuntimeError('stream_video_timeout')),patch.object(
+                rec.stop_event,'wait',side_effect=lambda _:rec.stop_event.set()):
+            rec.run()
+        self.assertIsNone(rec.progress()['online'])
+        self.assertEqual(rec.progress()['access'],'connection_error')
+
     def test_tiktok_api_error_is_unavailable_and_logs_safe_failure_reason(self):
-        session,_=self.session({'/api-live/user/room':{'statusCode':10231,'message':'The stream is inaccessible'}})
+        session,_=self.session({'/api-live/user/room':{'statusCode':10231,'data':None,'message':'The stream is inaccessible'},
+            '/@tester':'<html></html>','/@tester/live':'<html></html>'})
         rec=self.recorder('tiktok')
         with patch('streamlink_recorder.Streamlink',return_value=session):
             self.assertEqual(rec.discover()[-1],'unavailable')
@@ -241,7 +346,20 @@ class StreamlinkTests(unittest.TestCase):
             rec.run()
         self.assertIn('error=stream_remux_failed',logs.output[0])
 
-    def test_tiktok_legacy_hevc_flv_copies_full_resolution_and_audio(self):
+    def test_tiktok_does_not_switch_origin_after_writing_media_or_losing_access(self):
+        primary,alternate=object(),object()
+        origins={'h264_origin':primary,'h265_origin':alternate,'h264_hd':object()}
+        for already_recorded in (True,False):
+            rec=self.recorder('tiktok')
+            rec.capture_allowed=lambda _:already_recorded
+            def fail(_):
+                if already_recorded:rec.total_bytes+=100
+                raise StreamError('interrupted stream')
+            with patch.object(rec,'capture',side_effect=fail) as capture, self.assertRaises(StreamError):
+                rec.capture_stream(primary,origins,'1234')
+            capture.assert_called_once_with(primary)
+
+    def test_tiktok_tries_legacy_hevc_origin_when_h264_fails(self):
         enhanced=self.root/'enhanced.flv'
         run_media([media_tool('ffmpeg'),'-v','error','-y','-f','lavfi','-i','testsrc2=size=360x640:rate=5',
             '-f','lavfi','-i','sine=frequency=440:sample_rate=48000','-t','2',
@@ -266,7 +384,13 @@ class StreamlinkTests(unittest.TestCase):
         self.assertGreater(converted,0)
         raw=self.root/'legacy.flv';raw.write_bytes(legacy)
         outputs=[];rec=self.recorder('tiktok');rec.segment_callback=lambda path,meta:outputs.append(path)
-        rec.capture(type('FileStream',(),{'open':lambda _:raw.open('rb')})())
+        def broken_origin():raise StreamError('source is unavailable')
+        broken=type('UnavailableStream',(),{'open':staticmethod(broken_origin)})()
+        hevc=type('FileStream',(),{'open':lambda _:raw.open('rb')})()
+        origins={'h264_origin':broken,'h265_origin':hevc}
+        with patch.object(rec,'discover',return_value=(broken,origins,'1234','public')),patch.object(
+                rec.stop_event,'wait',side_effect=lambda _:rec.stop_event.set()):
+            rec.run()
         self.assertEqual(len(outputs),1)
         streams=json.loads(run_media([media_tool('ffprobe'),'-v','error','-show_streams','-of','json',str(outputs[0])]))['streams']
         video=next(s for s in streams if s['codec_type']=='video')

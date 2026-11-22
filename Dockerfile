@@ -26,6 +26,7 @@ FROM ubuntu:24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 ENV TZ=America/Sao_Paulo \
+    STREAMSAVEBOT_DATA_DIR=/app \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PLAYWRIGHT_BROWSERS_PATH=/app/tools/browsers \
@@ -51,10 +52,10 @@ RUN mkdir -p tools/ffmpeg/bin \
     && tools/telegram-bot-api/bin/telegram-bot-api --version
 COPY main.py ./
 COPY src/ ./src/
-COPY docs/stripchat-mouflon-LICENSE.txt /app/licenses/stripchat-mouflon.txt
+COPY src/vendor/stripchat-mouflon-LICENSE.txt /app/licenses/stripchat-mouflon.txt
 COPY tests/ ./tests/
 COPY scripts/docker_import.py ./scripts/docker_import.py
-COPY docker/entrypoint.sh /usr/local/bin/streamsavebot
+COPY scripts/entrypoint.sh /usr/local/bin/streamsavebot
 RUN sed -i 's/\r$//' /usr/local/bin/streamsavebot \
     && chmod 755 /usr/local/bin/streamsavebot \
     && useradd --uid 10001 --create-home bot \

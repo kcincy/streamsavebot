@@ -1,21 +1,27 @@
 """Streamlink discovery and packet-copy capture for Kick/TikTok, using the shared spool."""
-from collections import deque
-from pathlib import Path
 import logging
 import os
 import subprocess
 import threading
 import time
-from urllib.parse import urlsplit,parse_qs
+from urllib.parse import urlsplit
 
 from streamlink import Streamlink
+from streamlink.exceptions import StreamError
+from streamlink.plugins.tiktok import TikTok
 from recorder import StreamRecorder,Result,sync_playwright,open_context
 from platforms import profile_url
 from project_runtime import media_tool,TOOLS
 from stripchat_capture import IdentityError
+from tiktok_live import public_live as tiktok_live
 
 log=logging.getLogger(__name__)
 MAX_BOX=8*1024*1024
+CAPTURE_ERRORS={
+    'profile_identity_unavailable','live_identity_unavailable','stream_remux_failed',
+    'source_fragment_exceeds_part_limit','stream_no_video','stream_video_timeout',
+    'invalid_flv_header','invalid_flv_tag_size','truncated_flv_tag','truncated_flv_body',
+}
 
 
 def read_box(source):
@@ -51,10 +57,11 @@ def read_flv_tag(source):
     return header[0],bytes(body[:-4]),header+body
 
 
-def original_stream(platform,streams):
+def best_stream(platform,streams):
     if platform=='tiktok':
-        # Origin only: never fall back to hd/sd/auto when the source stream is unavailable.
-        return streams.get('h264_origin') or streams.get('h265_origin')
+        names=sorted((name for name in streams if name.startswith(('h264_','h265_'))),
+                     key=lambda name:TikTok.QUALITY_WEIGHTS.get(name.split('_',1)[1],-1),reverse=True)
+        return streams[names[0]] if names else None
     return streams.get('source') or streams.get('best')
 
 
@@ -104,21 +111,26 @@ class StreamlinkRecorder(StreamRecorder):
                            ('ringbuffer-size',8*1024*1024),('ffmpeg-ffmpeg',media_tool('ffmpeg')),
                            ('webbrowser-headless',True)):
             session.set_option(name,value)
+        if self.platform=='tiktok':
+            live,access=tiktok_live(session,self.url,self.follow_username,self.target_user_id)
+            if live is None:
+                return None,{},None,access
+            self.confirm_owner(live.owner_id)
+            self.live.title=live.title
+            live_id=self.observe_live(live.stream_id) if live.stream_id else None
+            if live_id is None:self._online(True)
+            source=best_stream(self.platform,live.streams) if access=='public' else None
+            if source:log.info('TikTok stream selected profile=%s quality=%s',self.follow_username,
+                next(name for name,value in live.streams.items() if value is source))
+            return source,live.streams,live_id,access
+
         relative='chrome-win64/chrome.exe' if os.name=='nt' else 'chrome-linux64/chrome'
         browsers=list((TOOLS/'browsers').glob('chromium-*/'+relative))
         if browsers:session.set_option('webbrowser-executable',str(max(browsers,key=lambda p:p.stat().st_mtime)))
-        identity={};observation={}
+        identity={}
         def response(response,*args,**kwargs):
             parsed=urlsplit(response.url)
-            if self.platform=='tiktok' and parsed.hostname=='www.tiktok.com' and parsed.path=='/api-live/user/room':
-                if parse_qs(parsed.query).get('uniqueId',[''])[0].casefold()!=self.follow_username:return
-                try:data=response.json().get('data',{})
-                except ValueError:return
-                observation.update(data.get('liveRoom') or {})
-                user=data.get('user') or observation.get('owner') or {}
-                identity.update(id=user.get('id') or observation.get('ownerUserId'),
-                                name=user.get('uniqueId') or self.follow_username)
-            elif self.platform=='kick' and parsed.hostname=='kick.com' and parsed.path==f'/api/v2/channels/{self.follow_username}/livestream':
+            if parsed.hostname=='kick.com' and parsed.path==f'/api/v2/channels/{self.follow_username}/livestream':
                 try:data=response.json().get('data') or {}
                 except ValueError:return
                 identity.update(id=data.get('channel_id'),name=self.follow_username)
@@ -126,32 +138,38 @@ class StreamlinkRecorder(StreamRecorder):
         name,plugin_class,resolved=session.resolve_url(self.url,follow_redirect=False)
         if name!=self.platform:raise ValueError('unexpected_streamlink_plugin')
         plugin=plugin_class(session,resolved)
-        if self.platform=='kick':plugin._get_cookies_from_webbrowser=lambda:self.kick_challenge(plugin)
+        plugin._get_cookies_from_webbrowser=lambda:self.kick_challenge(plugin)
         streams=plugin.streams()
         if not streams:
-            status='offline' if self.platform=='kick' or observation.get('status')==4 else 'unavailable'
-            return None,None,None,status
-        if self.platform=='kick' and not identity.get('id'):
+            return None,None,None,'offline'
+        if not identity.get('id'):
             response=session.http.get(f'https://kick.com/api/v2/channels/{self.follow_username}',
                 headers=plugin._get_api_headers(),timeout=15)
             try:data=response.json()
             finally:response.close()
             data=data.get('data') or data
             identity.update(id=data.get('id'),name=data.get('slug') or self.follow_username)
-        if not identity.get('id'):raise RuntimeError('profile_identity_unavailable')
         if str(identity['name']).casefold()!=self.follow_username:raise IdentityError('profile_name_changed')
-        uid=str(identity['id'])
+        self.confirm_owner(identity['id'])
+        self.live.title=plugin.title or ''
+        if not plugin.id:raise RuntimeError('live_identity_unavailable')
+        live_id=self.observe_live(str(plugin.id))
+        selected=best_stream(self.platform,streams)
+        return selected,streams,live_id,'public' if selected else 'unavailable'
+
+    def confirm_owner(self,owner_id):
+        if not owner_id:raise RuntimeError('profile_identity_unavailable')
+        uid=str(owner_id)
         if self.target_user_id and self.target_user_id!=uid:raise IdentityError('profile_identity_changed')
         if not self.target_user_id:
             if self.identity_callback:self.identity_callback(uid)
             self.target_user_id=uid
-        self.live.user_id=uid;self.live.title=plugin.title or ''
-        if not plugin.id:raise RuntimeError('live_identity_unavailable')
-        token=str(plugin.id)
+        self.live.user_id=uid
+
+    def observe_live(self,token):
         live_id=self.live_id_callback(token,True) if self.live_id_callback else token
         self.live.livestream_id=live_id;self._online(True,live_id)
-        selected=original_stream(self.platform,streams)
-        return selected,streams,live_id,'public' if selected else 'unavailable'
+        return live_id
 
     def publish(self,ended=None):
         if not self.file:return
@@ -225,39 +243,44 @@ class StreamlinkRecorder(StreamRecorder):
 
     def capture(self,stream):
         self.status='connecting'
-        self.input=stream.open()
+        source=self.input=stream.open()
         command=[media_tool('ffmpeg'),'-v','error','-nostdin','-fflags','+genpts+discardcorrupt',
             '-i','pipe:0','-map','0:v:0','-map','0:a:0?','-c','copy']
         if self.platform=='kick':command+=['-bsf:a','aac_adtstoasc']
         if self.platform=='tiktok':
             self.source_suffix='.flv'
-            command+=['-flvflags','no_duration_filesize','-f','flv','pipe:1']
+            command+=['-flush_packets','1','-flvflags','no_duration_filesize','-f','flv','pipe:1']
         else:command+=['-movflags','+frag_keyframe+empty_moov+default_base_moof','-f','mp4','pipe:1']
         flags={'creationflags':getattr(subprocess,'CREATE_NO_WINDOW',0)} if os.name=='nt' else {'start_new_session':True}
-        try:self.proc=subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,**flags)
+        try:self.proc=subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,**flags)
         except Exception:
             self.input.close();self.input=None
             raise
         self.status='waiting_data'
-        proc=self.proc;cancel=threading.Event();errors=deque(maxlen=8)
-        self.last_video=time.monotonic()
+        proc=self.proc;cancel=threading.Event();timed_out=threading.Event()
+        bytes_before=self.total_bytes
+        started=self.last_video=time.monotonic()
         def pump():
             try:
                 while not cancel.is_set() and not self.stop_event.is_set():
-                    data=self.input.read(64*1024)
+                    data=source.read(64*1024)
                     if not data:break
                     proc.stdin.write(data)
-            except Exception as exc:errors.append(type(exc).__name__)
+            except (OSError,ValueError,StreamError):pass
             finally:
                 try:proc.stdin.close()
                 except OSError:pass
-        def stderr():
-            for line in iter(proc.stderr.readline,b''):errors.append(line[-256:])
         def guard():
             while not cancel.wait(1):
                 try:allowed=not self.capture_allowed or self.capture_allowed(self.live.livestream_id)
                 except Exception:allowed=False
-                if self.stop_event.is_set() or not allowed or time.monotonic()-self.last_video>max(5,self.stall_timeout):
+                timeout=max(5,self.stall_timeout)
+                last_video=self.last_video
+                if self.platform=='tiktok' and self.total_bytes==bytes_before:
+                    timeout=max(timeout,self.stall_timeout*2)
+                    last_video=started
+                if self.stop_event.is_set() or not allowed or time.monotonic()-last_video>timeout:
+                    if allowed and not self.stop_event.is_set():timed_out.set()
                     if proc.poll() is None:
                         try:
                             proc.terminate()
@@ -265,13 +288,19 @@ class StreamlinkRecorder(StreamRecorder):
                             except subprocess.TimeoutExpired:proc.kill()
                         except OSError:pass
                     return
-        reader=threading.Thread(target=pump,daemon=True);error_reader=threading.Thread(target=stderr,daemon=True)
+        reader=threading.Thread(target=pump,daemon=True)
         watchdog=threading.Thread(target=guard,daemon=True)
-        reader.start();error_reader.start();watchdog.start();init=b'';fragment=None;ended=False
+        reader.start();watchdog.start();init=b'';fragment=None;ended=False
         try:
             if self.platform=='tiktok':
-                reason=self.capture_flv(proc.stdout)
-                if reason=='ended' and not self.stop_event.is_set() and proc.wait(timeout=5):raise RuntimeError('stream_remux_failed')
+                try:reason=self.capture_flv(proc.stdout)
+                except (ValueError,EOFError):
+                    if timed_out.is_set():raise RuntimeError('stream_video_timeout') from None
+                    raise
+                if reason=='ended' and not self.stop_event.is_set():
+                    if timed_out.is_set():raise RuntimeError('stream_video_timeout')
+                    if proc.wait(timeout=5):raise RuntimeError('stream_remux_failed')
+                    if self.total_bytes==bytes_before:raise RuntimeError('stream_no_video')
                 return
             while not self.stop_event.is_set():
                 box=read_box(proc.stdout)
@@ -290,15 +319,31 @@ class StreamlinkRecorder(StreamRecorder):
         finally:
             ended=time.time();self._part_finished()
             cancel.set()
-            try:self.input.close()
+            try:source.close()
             except Exception:pass
             if proc.poll() is None:proc.terminate()
             try:proc.wait(timeout=5)
             except subprocess.TimeoutExpired:proc.kill();proc.wait()
-            reader.join(timeout=16);error_reader.join(timeout=5);watchdog.join(timeout=2)
-            for pipe in (proc.stdout,proc.stderr):pipe.close()
+            reader.join(timeout=16);watchdog.join(timeout=2)
+            proc.stdout.close()
             self.input=None;self.proc=None
             self.publish(ended)
+
+    def capture_stream(self,stream,streams,live_id):
+        if self.platform!='tiktok':
+            self.capture(stream)
+            return
+        alternate=best_stream('tiktok',{name:value for name,value in streams.items() if value is not stream})
+        bytes_before=self.total_bytes
+        try:
+            self.capture(stream)
+        except (StreamError,EOFError,ValueError,RuntimeError,subprocess.TimeoutExpired) as exc:
+            if (alternate is None or self.total_bytes!=bytes_before or self.stop_event.is_set()
+                    or (self.capture_allowed and not self.capture_allowed(live_id))):
+                raise
+            reason=str(exc) if str(exc) in CAPTURE_ERRORS else type(exc).__name__
+            log.info('TikTok retry alternate stream profile=%s error=%s',self.follow_username,reason)
+            self.capture(alternate)
 
     def run(self):
         error=''
@@ -306,15 +351,19 @@ class StreamlinkRecorder(StreamRecorder):
             try:
                 self.status='checking'
                 with self.check_guard():stream,streams,live_id,access=self.discover()
-                with self._progress_lock:self._progress['access']=access
+                with self._progress_lock:
+                    previous=self._progress.get('access')
+                    self._progress['access']=access
+                if self.platform=='tiktok' and access!=previous:
+                    log.info('TikTok discovery profile=%s status=%s',self.follow_username,access)
                 if stream is None:
-                    self._online(False if access=='offline' else None)
+                    if access!='live_no_stream':self._online(False if access=='offline' else None)
                     if access=='offline' and self.live_id_callback:self.live_id_callback('',False)
                     self.status=access
                 elif self.capture_allowed and not self.capture_allowed(live_id):self.status='watching'
                 elif not self.capture_acquire():self.status='waiting_resources'
                 else:
-                    try:self.capture(stream)
+                    try:self.capture_stream(stream,streams,live_id)
                     finally:self.capture_release()
                     if not self.stop_event.is_set():self.status='reconnecting'
             except IdentityError as exc:
@@ -324,10 +373,10 @@ class StreamlinkRecorder(StreamRecorder):
                 self.status='watching'
             except Exception as exc:
                 self.capture_failure()
+                self._online(None)
+                with self._progress_lock:self._progress['access']='connection_error'
                 self.status='reconnecting'
-                reason=str(exc) if isinstance(exc,RuntimeError) and str(exc) in (
-                    'profile_identity_unavailable','live_identity_unavailable','stream_remux_failed',
-                    'source_fragment_exceeds_part_limit') else type(exc).__name__
+                reason=str(exc) if str(exc) in CAPTURE_ERRORS else type(exc).__name__
                 log.warning('Streamlink retry platform=%s profile=%s error=%s',self.platform,self.follow_username,reason)
             finally:
                 if self.session:

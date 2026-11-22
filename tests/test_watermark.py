@@ -132,7 +132,7 @@ class WatermarkPipelineTests(unittest.IsolatedAsyncioTestCase):
     visible=WatermarkTests.visible
     source=WatermarkTests.source
 
-    async def test_queue_waits_for_resources_preserves_capture_and_sheet_is_unmarked(self):
+    async def test_queue_waits_for_resources_and_preserves_unmarked_capture(self):
         await self.exercise(True)
 
     async def test_disabled_boolean_skips_encoding_and_resource_wait_even_with_text_configured(self):
@@ -162,10 +162,6 @@ class WatermarkPipelineTests(unittest.IsolatedAsyncioTestCase):
                 output=Path(store.db.execute('SELECT path FROM media').fetchone()[0])
                 self.assertEqual(self.visible(output,1),enabled);self.assertFalse(self.visible(output,31))
                 self.assertTrue(raw.is_file());self.assertFalse(self.visible(raw,1))
-                sheet=service.sheets/'images'/(ident+'.jpg')
-                data=run_media([media_tool('ffmpeg'),'-v','error','-threads','1','-i',str(sheet),
-                                '-frames:v','1','-pix_fmt','gray','-f','rawvideo','pipe:1'])
-                self.assertEqual(len(data),1440*810);self.assertLess(max(data),180)
             finally:
                 service.closed=True;await worker;store.close()
 

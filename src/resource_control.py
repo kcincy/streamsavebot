@@ -10,6 +10,8 @@ import threading
 import time
 
 log=logging.getLogger(__name__)
+CPU_HIGH=.85
+MEMORY_HIGH=.85
 
 
 class PlatformBackoff:
@@ -26,12 +28,17 @@ class PlatformBackoff:
 
 
 class ResourceProbe:
-    def __init__(self,folder,cgroup=Path('/sys/fs/cgroup'),host_folders=()):
+    def __init__(self,folder,cgroup=Path('/sys/fs/cgroup'),host_folders=(),*,disk_only=False):
         self.folder,self.cgroup=Path(folder),cgroup
         self.host_folders=host_folders
+        self.disk_only=disk_only
         self.previous=None
 
     def sample(self):
+        free=min(shutil.disk_usage(path).free for path in (self.folder,*self.host_folders) if path.exists())
+        if self.disk_only:
+            # Termux PRoot has no dedicated cgroup. Skip CPU/RAM thresholds.
+            return dict(cpu=0.0,memory=0.0,free=free)
         now=time.monotonic();cpu=0.0;memory=0.0
         if os.name=='nt':
             import ctypes
@@ -65,14 +72,14 @@ class ResourceProbe:
             memory=max(0,used-int(statistics.get('inactive_file',0)))/int(limit)
             meminfo={line.split(':')[0]:int(line.split()[1])*1024 for line in Path('/proc/meminfo').read_text().splitlines()}
             if meminfo.get('MemAvailable',2**63)<512*1024*1024:memory=max(memory,.95)
-        free=min(shutil.disk_usage(path).free for path in (self.folder,*self.host_folders) if path.exists())
         return dict(cpu=cpu,memory=memory,free=free)
 
 
 class CaptureGate:
     def __init__(self,config,store,delivery,clock=time.monotonic):
         self.config,self.store,self.delivery,self.clock=config,store,delivery,clock
-        self.probe=ResourceProbe(config.spool,host_folders=(config.database.parent/'backups',config.database.parent/'sheets/images'))
+        self.probe=ResourceProbe(config.spool,host_folders=(config.database.parent/'backups',),
+                                 disk_only=config.disk_only_resources)
         self.active={};self.revoked=set();self.cooldown={};self.seen={}
         self.starting=set()
         self.blocked=False;self.reason='starting';self.high=None;self.low=None;self.critical=None
@@ -96,15 +103,17 @@ class CaptureGate:
 
     def update(self,sample):
         now=self.clock();self.sample=sample
-        high=sample['cpu']>=.8 or sample['memory']>=.8
-        low=sample['cpu']<.65 and sample['memory']<.7
+        cpu_high=sample['cpu']>=CPU_HIGH
+        memory_high=sample['memory']>=MEMORY_HIGH
+        high=cpu_high or memory_high
+        low=sample['cpu']<.70 and sample['memory']<.75
         self.high=(self.high if self.high is not None else now) if high else None
         self.low=(self.low if self.low is not None else now) if low else None
         critical=sample['memory']>=.9 or sample['cpu']>=.95
         self.critical=(self.critical if self.critical is not None else now) if critical else None
         if self.high is not None and now-self.high>=15:self.blocked=True
         if self.low is not None and now-self.low>=30:self.blocked=False
-        self.reason='memory' if sample['memory']>=.8 else 'cpu' if sample['cpu']>=.8 else 'recovery' if self.blocked else ''
+        self.reason='memory' if memory_high else 'cpu' if cpu_high else 'recovery' if self.blocked else ''
         if sample['free']<max(1024**3,4*self.config.part_bytes):self.reason='disk'
         if self.reason=='disk':
             for key in self.active:
@@ -130,8 +139,8 @@ class CaptureGate:
         if key not in self.order:
             self.order[key]=time.time()
             with self.store.db:self.store.db.execute('INSERT OR IGNORE INTO capture_wait VALUES(?,?)',(key,self.order[key]))
-        if (self.delivery.backing_up or self.sample is None or self.blocked or self.reason=='disk' or self.sample['memory']>=.8
-                or self.sample['cpu']>=.8 or len(self.active)>=self.config.max_captures
+        if (self.delivery.backing_up or self.sample is None or self.blocked or self.reason in ('disk','memory','cpu')
+                or len(self.active)>=self.config.max_captures
                 or self.starting or now-self.last_start<15 or now<self.cooldown.get(key,0)
                 or len(self.delivery.budget.ids)>=self.delivery.budget.slots):return False
         eligible=[p for p in self.waiting() if now>=self.cooldown.get(p,0) and self.store.recipients(p)]
@@ -156,8 +165,11 @@ class CaptureGate:
         return sorted(self.order,key=lambda p:(min((counts[uid] for uid in self.store.recipients(p)),default=10**9),self.order[p],p))
 
     def health(self):
+        resources=self.sample
+        if resources is not None and self.probe.disk_only:
+            resources={'free':resources['free']}
         return dict(at=time.time(),active=len(self.active),waiting=len(self.order),reason=self.reason,
-                    blocked=self.blocked,resources=self.sample,buffer_used=len(self.delivery.budget.ids),
+                    blocked=self.blocked,resources=resources,buffer_used=len(self.delivery.budget.ids),
                     buffer_limit=self.delivery.budget.slots,starting=len(self.starting))
 
     def save_health(self,path):

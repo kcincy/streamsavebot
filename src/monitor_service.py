@@ -41,7 +41,7 @@ class MonitorRegistry:
         self.browsers=BrowserPool()
         self.gate=CaptureGate(config,store,delivery)
         self.delivery.can_process=lambda:bool(self.gate.sample and not self.gate.blocked and not self.gate.reason
-            and not self.gate.starting and self.gate.sample['cpu']<.45 and self.gate.sample['memory']<.7)
+            and not self.gate.starting and self.gate.sample['cpu']<.55 and self.gate.sample['memory']<.75)
         self.backoff=PlatformBackoff()
         # Long-lived captures must not occupy asyncio's pool used by processing and uploads.
         self.capture_workers=ThreadPoolExecutor(max_workers=128,thread_name_prefix='capture')
@@ -207,12 +207,13 @@ class MonitorRegistry:
                         'recovery':t('resource recovery')}.get(self.gate.reason,t('capture capacity'))
                 state=t('⏳ Waiting for resources · Position {position} · {reason}',
                         position=self.gate.position(username),reason=reason)
-            elif progress.get('access') in ('private','restricted','blocked','unavailable'):
+            elif progress.get('access') in ('private','restricted','blocked','unavailable','live_no_stream'):
                 state={
                     'private':t('🔒 Private live · Waiting for a public stream'),
                     'restricted':t('🔒 Restricted room · Waiting for a public stream'),
                     'blocked':t('🚫 Profile blocked/geoblocked · Monitoring continues'),
                     'unavailable':t('❔ Profile unavailable · Retrying'),
+                    'live_no_stream':t('👁 Live · Waiting for a video stream'),
                 }[progress['access']]
                 recording=False
             elif recording:
@@ -245,7 +246,7 @@ class MonitorRegistry:
                              label=label,platform=split_profile(username)[0],
                              stopped=stopped,can_send=bool(recording),can_stop=bool(sub['enabled'] and not stopped and progress.get('online')
                                                           and member
-                                                          and progress.get('access') not in ('private','restricted','blocked','unavailable')),
+                                                          and progress.get('access') not in ('private','restricted','blocked','unavailable','live_no_stream')),
                              online=online,recording=recording,text=text))
         return rows
 
@@ -260,8 +261,9 @@ class MonitorRegistry:
             return tr(language,'Waiting for finalization before resuming')
         return tr(language,{
             'queued':'Waiting for capture resources', 'starting':'Starting',
+            'live_no_stream':'Live · Waiting for a video stream',
             'checking':'Checking profile', 'offline':'Offline; waiting to return',
-            'connecting':'Opening source stream', 'waiting_data':'Waiting for source video data',
+            'connecting':'Opening video stream', 'waiting_data':'Waiting for source video data',
             'recording':'Recording and sending in parts', 'reconnecting':'Reconnecting',
             'waiting_space':'Waiting for space in the delivery queue', 'finalizing':'Finalizing part',
             'waiting_resources':'Waiting for capture resources',
@@ -342,9 +344,10 @@ class MonitorRegistry:
         rec.identity_callback = identity
         rec.monitor_key=username
         rec.check_guard=lambda:self.gate.checking(rec.stop_event)
-        rec.retry_delay=lambda delay:self.backoff.delay(platform,delay)
-        rec.capture_failure=lambda:self.backoff.failed(platform)
-        rec.capture_recovered=lambda:self.backoff.recovered(platform)
+        retry_key=username if platform=='tiktok' else platform
+        rec.retry_delay=lambda delay:self.backoff.delay(retry_key,delay)
+        rec.capture_failure=lambda:self.backoff.failed(retry_key)
+        rec.capture_recovered=lambda:self.backoff.recovered(retry_key)
         def acquire():
             return asyncio.run_coroutine_threadsafe(self._admit(username),self.loop).result(timeout=30)
         def release():

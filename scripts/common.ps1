@@ -6,11 +6,11 @@ $ProjectNativeExitCode = 0
 foreach ($name in @('TEMP', 'TMP', 'PIP_CACHE_DIR', 'PLAYWRIGHT_BROWSERS_PATH', 'PLAYWRIGHT_SKIP_BROWSER_GC', 'PYTHONUTF8', 'PYTHONPATH', 'PATH')) {
     $ProjectEnvironmentBefore[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
 }
-$ProjectTemporary = Join-Path $ProjectRoot 'cache\tmp'
+$ProjectTemporary = Join-Path $ProjectRoot 'data\cache\tmp'
 New-Item -ItemType Directory -Force -Path $ProjectTemporary | Out-Null
 $env:TEMP = $ProjectTemporary
 $env:TMP = $ProjectTemporary
-$env:PIP_CACHE_DIR = Join-Path $ProjectRoot 'cache\pip-cache'
+$env:PIP_CACHE_DIR = Join-Path $ProjectRoot 'data\cache\pip-cache'
 $env:PYTHONPATH = Join-Path $ProjectRoot 'src'
 $env:PLAYWRIGHT_BROWSERS_PATH = Join-Path $ProjectRoot 'tools\browsers'
 $env:PLAYWRIGHT_SKIP_BROWSER_GC = '1'

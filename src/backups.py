@@ -26,7 +26,7 @@ def verify_archive(path,destination=None):
                     checksum=hashlib.sha256()
                     while chunk:=source.read(1024*1024):checksum.update(chunk);out.write(chunk)
                 if checksum.hexdigest()!=digest:raise ValueError('backup_digest_failed')
-            for name in ('database/bot.sqlite3','database/sheets/sheets.sqlite3'):
+            for name in ('database/bot.sqlite3',):
                 with closing(sqlite3.connect(root/name)) as db:
                     if db.execute('PRAGMA integrity_check').fetchone()[0]!='ok':raise ValueError('backup_database_invalid')
             return manifest
@@ -36,7 +36,7 @@ def create_backup(config):
     database=config.database.parent;folder=database/'backups';folder.mkdir(parents=True,exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='.snapshot-',dir=folder) as tmp:
         snapshot=Path(tmp);files={}
-        for relative in ('bot.sqlite3','sheets/sheets.sqlite3'):
+        for relative in ('bot.sqlite3',):
             source=database/relative;target=snapshot/relative;target.parent.mkdir(parents=True,exist_ok=True)
             with closing(sqlite3.connect(source.as_uri()+'?mode=ro',uri=True)) as src,closing(sqlite3.connect(target)) as dst:src.backup(dst)
             files['database/'+relative]=target
@@ -47,8 +47,6 @@ def create_backup(config):
             path=Path(name).resolve()
             if not path.is_relative_to(config.spool.resolve()):raise ValueError('backup_media_outside_spool')
             if path.is_file():files['cache/spool/'+path.relative_to(config.spool.resolve()).as_posix()]=path
-        for path in (database/'sheets/images').glob('*.jpg'):
-            if not path.is_symlink():files['database/sheets/images/'+path.name]=path
         root=Path(__file__).resolve().parents[1]
         for name in ('settings.env','compose.yaml','requirements.txt','Dockerfile','main.py'):
             path=root/name

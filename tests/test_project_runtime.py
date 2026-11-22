@@ -19,7 +19,7 @@ class ProjectRuntimeTests(unittest.TestCase):
             self.assertTrue(Path(module.__file__).resolve().is_relative_to(project / '.venv'))
         runtime.configure_runtime()
         self.assertEqual(Path(os.environ['PLAYWRIGHT_BROWSERS_PATH']), project / 'tools' / 'browsers')
-        self.assertEqual(Path(tempfile.gettempdir()), project / 'cache' / 'tmp')
+        self.assertEqual(Path(tempfile.gettempdir()), runtime.CACHE / 'tmp')
         self.assertEqual(Path(os.environ['TMPDIR']), Path(tempfile.gettempdir()))
         self.assertEqual(Path(runtime.media_tool('ffmpeg')), project / 'tools' / 'ffmpeg' / 'bin' / ('ffmpeg.exe' if os.name=='nt' else 'ffmpeg'))
         rec = engine.StreamRecorder(engine.Live('alvo', '', '', 0, ''), project / 'recordings')

@@ -208,6 +208,25 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(path.exists())
         self.assertEqual(self.store.delivery_status(1,'alvo'),{'pending':1})
 
+    async def test_alerta_de_atraso_notifica_uma_vez_por_fila_e_preserva_falhas(self):
+        failed,failed_path=self.clip(users=(1,))
+        self.store.delivery(self.store.next_delivery(),'failed')
+        _,pending_path=self.clip(users=(1,),started=2)
+        pending=self.store.next_delivery()
+        with self.store.db:self.store.db.execute('UPDATE clips SET expires=0')
+        with patch.object(self.pipeline,'alert',new=AsyncMock(return_value=True)) as alert:
+            await self.pipeline.cleanup()
+            await self.pipeline.cleanup()
+            alert.assert_awaited_once()
+            self.store.delivery(pending,'uncertain')
+            await self.pipeline.cleanup()
+            self.assertFalse(self.store.has_overdue_work(1))
+            self.assertTrue(failed_path.exists() and pending_path.exists())
+            self.assertEqual(self.store.delivery_status(1,'alvo'),{'failed':1,'uncertain':1})
+            self.store.set_clip(failed,'processing')
+            await self.pipeline.cleanup()
+            self.assertEqual(alert.await_count,2)
+
     async def test_recupera_raw_remove_orfaos_e_preserva_metadados(self):
         cid=uuid.uuid4().hex;folder=self.pipeline._folder(cid);folder.mkdir()
         raw=folder/'capture.mkv';raw.write_bytes(b'raw')

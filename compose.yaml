@@ -7,8 +7,8 @@ services:
     init: true
     restart: unless-stopped
     stop_grace_period: 35m
-    cpus: 6.0
-    mem_limit: 6g
+    cpus: 6.5
+    mem_limit: 6656m
     shm_size: 1gb
     pids_limit: 4096
     read_only: true
@@ -30,13 +30,8 @@ services:
       - cache:/app/cache
       - logs:/app/logs
       - type: bind
-        source: ./database/backups
+        source: ./data/database/backups
         target: /app/database/backups
-        bind:
-          create_host_path: false
-      - type: bind
-        source: ./database/sheets/images
-        target: /app/database/sheets/images
         bind:
           create_host_path: false
       - type: bind

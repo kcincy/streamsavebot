@@ -44,6 +44,7 @@ class Config:
     max_captures: int = 100
     watermark_text: str = ''
     watermark_enabled: bool = True
+    disk_only_resources: bool = False
 
     @property
     def watermark_active(self):return self.watermark_enabled and bool(self.watermark_text)
@@ -99,7 +100,8 @@ class Config:
                      superuser_id=number(values,'SUPERUSER_ID',0,0,2**63-1) or None,
                      low_resource_mode=bool(number(values,'LOW_RESOURCE_MODE',1,0,1)),
                      max_captures=number(values,'MAX_ACTIVE_CAPTURES',100,1,100),
-                     watermark_text=watermark,watermark_enabled=boolean(values,'WATERMARK_ENABLED'))
+                     watermark_text=watermark,watermark_enabled=boolean(values,'WATERMARK_ENABLED'),
+                     disk_only_resources=bool(number(values,'DISK_ONLY_RESOURCES',0,0,1)))
         if config.spool_bytes < config.reservation_bytes:
             raise ValueError("SPOOL_MAX_MB precisa comportar quatro partes de PART_MAX_MB com margem.")
         return config

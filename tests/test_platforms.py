@@ -10,6 +10,18 @@ from test_telegram import RegistryFixture,BlockingRecorder,until
 
 
 class PlatformTests(RegistryFixture):
+    async def test_tiktok_live_sem_origem_aparece_ao_vivo_no_monitor(self):
+        with patch('monitor_service.StreamlinkRecorder', lambda *args,platform,**kwargs: BlockingRecorder(*args,**kwargs)):
+            self.registry.add(1,10,'@Alvo','tiktok')
+            await until(lambda:BlockingRecorder.active==1)
+            self.store.set_language(1,'pt')
+            rec=self.registry.monitors['tiktok:alvo'].recorder
+            rec.sample.update(online=True,recording=False,access='live_no_stream')
+            row=self.registry.details(1,10)[0]
+            self.assertTrue(row['online'])
+            self.assertIn('Ao vivo · Aguardando um fluxo de vídeo',row['text'])
+            self.assertFalse(row['recording'])
+
     async def test_mesmo_nome_compartilha_apenas_na_mesma_plataforma_e_preserva_estado(self):
         with patch('monitor_service.StripchatRecorder',BlockingRecorder):
             self.registry.add(1,10,'@Alvo','superlive')

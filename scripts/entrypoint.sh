@@ -2,7 +2,7 @@
 set -eu
 
 if [ ! -f /app/database/bot.sqlite3 ]; then
-    echo 'Importe os dados primeiro: veja docs/DOCKER.md.' >&2
+    echo 'Inicialize ou importe os dados primeiro: veja README.md e docs/OPERACAO.md.' >&2
     exit 1
 fi
 if [ -f /app/database/sessions/superlive.json ]; then
